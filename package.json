@@ -1,6 +1,6 @@
 {
-  "name": "aigram-bot",
-  "version": "1.0.0",
+  "name": "telegram-bot",
+  "version": "9.0.0",
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
@@ -8,6 +8,6 @@
     "tail": "wrangler tail"
   },
   "devDependencies": {
-    "wrangler": "^3.90.0"
+    "wrangler": "^4.0.0"
   }
 }

@@ -1,21 +1,24 @@
-name = "aigram-bot"
+name = "telegram-bot"
 main = "src/index.js"
 compatibility_date = "2026-01-01"
+workers_dev = true
 
-# Cron Trigger: chạy mỗi phút để kiểm tra ai đang im lặng quá lâu (10'/30') và gửi nhắc nhở.
-# Đây là cách thay thế cho threading.Thread + time.sleep() trong bản Python cũ - Cloudflare Workers
-# không hỗ trợ tiến trình chạy nền liên tục, nên phải dùng lịch chạy định kỳ (tối thiểu 1 phút/lần).
+# Giữ lại các biến bạn đã đặt trong dashboard (XSMB_URL, TAVILY_CAP, GEMINI_MODEL...) khi deploy từ GitHub.
+# Secrets (TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, TAVILY_API_KEY, GITHUB_WEBHOOK_SECRET...) luôn được giữ nguyên.
+keep_vars = true
+
+# Nhắc nhở mỗi 5 phút (đủ cho mốc 10'/30', và tiết kiệm hạn mức KV miễn phí)
 [triggers]
-crons = ["* * * * *"]
+crons = ["*/5 * * * *"]
 
-# Cloudflare KV: thay thế cho dict `users = {}` trong bản Python cũ (vốn lưu trong RAM, mất khi tiến
-# trình dừng). KV lưu bền vững giữa các lần Worker được gọi - mỗi request là 1 lần "sống" độc lập.
-# Sau khi tạo namespace thật (wrangler kv namespace create USERS_KV), thay "id" bên dưới bằng ID thật.
+# Dán ID thật của KV namespace USERS_KV: Cloudflare -> Storage & Databases -> KV -> USERS_KV -> copy ID
 [[kv_namespaces]]
 binding = "USERS_KV"
-id = "THAY_BANG_KV_NAMESPACE_ID_THAT"
+id = "DAN_ID_KV_THAT_VAO_DAY"
 
-# Biến môi trường không nhạy cảm (đặt trực tiếp ở đây được, khác secrets phải dùng wrangler secret put)
+[observability]
+enabled = true
+
 [vars]
 PERSONALITY_MODE = "dynamic"
 GROUP_MODE = "mention_only"
