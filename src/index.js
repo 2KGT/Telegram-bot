@@ -4,7 +4,7 @@
 // KV binding: USERS_KV   |  Biến tuỳ chọn: GEMINI_MODEL, PERSONALITY_MODE, GROUP_MODE
 // ============================================================
 
-const BOT_VERSION = "v10.1-models";
+const BOT_VERSION = "v10.2-format";
 
 // Tự động chọn model theo độ khó của tin nhắn:
 //  - "fast": câu ngắn, trò chuyện thường, nhắc nhở  -> model lite (nhanh, ~1s)
@@ -326,7 +326,7 @@ class TelegramClient {
     // Nếu lỗi parse HTML/Markdown thì gửi lại dạng văn bản thường
     if (!data.ok && options.parse_mode && /parse entities/i.test(data.description || "")) {
       const { parse_mode, ...rest } = options;
-      data = await this.call("sendMessage", { chat_id: chatId, text: text.replace(/<[^>]+>/g, ""), allow_sending_without_reply: true, ...rest });
+      data = await this.call("sendMessage", { chat_id: chatId, text: text.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"), allow_sending_without_reply: true, ...rest });
     }
     return data.ok;
   }
@@ -768,7 +768,7 @@ async function handlePrivateMessage(env, tg, message, personality) {
   if (!isFallback) appendHistory(state, "model", aiReply);
 
   // Gửi trả lời TRƯỚC, lưu state sau → KV lỗi cũng không làm mất câu trả lời
-  await tg.replyToMessage(chatId, message.message_id, aiReply);
+  await sendAi(tg, chatId, message.message_id, aiReply);
   await saveUserState(env.USERS_KV, chatId, state);
 }
 
@@ -822,7 +822,7 @@ async function handleGroupMessage(env, tg, message, personality, groupMode, botU
   appendHistory(state, "user", `${senderName}: ${text}`);
   if (!shouldReply) { await saveUserState(env.USERS_KV, chatId, state); return; }
   if (!isFallback) appendHistory(state, "model", aiReply);
-  await tg.replyToMessage(chatId, message.message_id, aiReply);
+  await sendAi(tg, chatId, message.message_id, aiReply);
   await saveUserState(env.USERS_KV, chatId, state);
 }
 
@@ -2293,7 +2293,7 @@ async function handleSearchCommand(env, tg, message, args, personality) {
   if (!q) return tg.replyToMessage(chatId, message.message_id, "Dùng: /tim câu hỏi cần tra web. Ví dụ: /tim học phí trường Đại học Bách khoa Hà Nội");
   await tg.call("sendChatAction", { chat_id: chatId, action: "typing" });
   const { text } = await generateContent(env, tg, personality, { contextMessage: q, history: [], search: true });
-  await tg.replyToMessage(chatId, message.message_id, text.slice(0, 4000));
+  await sendAi(tg, chatId, message.message_id, text);
 }
 
 async function handleXsmbCommand(env, tg, message, args) {
@@ -2335,6 +2335,49 @@ async function auditLog(env, chatId, by, act, target, note) {
     arr.push({ t: Date.now(), bn: userName(by || {}).slice(0, 30), act, to: target ? userName(target).slice(0, 30) : "", note: String(note || "").slice(0, 60) });
     await env.USERS_KV.put(key, JSON.stringify(arr.slice(-30)));
   } catch (e) {}
+}
+
+// ---------------- Đổi Markdown của AI sang định dạng Telegram (HTML) ----------------
+
+function mdToTgHtml(src) {
+  const blocks = [];
+  let s = String(src || "");
+  s = s.replace(/```[a-zA-Z0-9]*\n?([\s\S]*?)```/g, (m, code) => { blocks.push(`<pre>${escapeHtml(code.replace(/\n$/, ""))}</pre>`); return `\u0000${blocks.length - 1}\u0000`; });
+  s = s.replace(/`([^`\n]+)`/g, (m, code) => { blocks.push(`<code>${escapeHtml(code)}</code>`); return `\u0000${blocks.length - 1}\u0000`; });
+  s = escapeHtml(s)
+    .replace(/^\s{0,3}#{1,6}\s+(.+)$/gm, "<b>$1</b>")
+    .replace(/^\s*[*-]\s+/gm, "• ")
+    .replace(/\*\*([^*\n]+?)\*\*/g, "<b>$1</b>")
+    .replace(/__([^_\n]+?)__/g, "<b>$1</b>")
+    .replace(/(^|[\s(])\*([^*\n]+?)\*(?=$|[\s).,!?:;])/g, "$1<i>$2</i>")
+    .replace(/(^|[\s(])_([^_\n]+?)_(?=$|[\s).,!?:;])/g, "$1<i>$2</i>")
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (m, tx, u) => `<a href="${u.replace(/"/g, "%22")}">${tx}</a>`);
+  return s.replace(/\u0000(\d+)\u0000/g, (m, i) => blocks[Number(i)]);
+}
+
+function splitForTelegram(text, max) {
+  if (text.length <= max) return [text];
+  const out = [];
+  let rest = text;
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf("\n", max);
+    if (cut < max * 0.5) cut = rest.lastIndexOf(" ", max);
+    if (cut <= 0) cut = max;
+    out.push(rest.slice(0, cut));
+    rest = rest.slice(cut).trimStart();
+  }
+  if (rest) out.push(rest);
+  return out;
+}
+
+async function sendAi(tg, chatId, replyTo, text) {
+  let first = true;
+  for (const part of splitForTelegram(String(text || ""), 3500)) {
+    const opts = { parse_mode: "HTML", disable_web_page_preview: true };
+    if (replyTo && first) opts.reply_to_message_id = replyTo;
+    await tg.sendMessage(chatId, mdToTgHtml(part), opts);
+    first = false;
+  }
 }
 
 let cachedBotUsername = null;
@@ -2417,7 +2460,7 @@ async function handleScheduled(env) {
       const fresh = await getUserState(env.USERS_KV, chatId);
       if (fresh.lastReplyTime !== checkTime) continue; // người dùng vừa nhắn lại
 
-      await tg.sendMessage(chatId, text);
+      await sendAi(tg, chatId, null, text);
       fresh.reminderStage = stage;
       if (!isFallback) appendHistory(fresh, "model", text);
       if (stage === 2) fresh.running = false;
