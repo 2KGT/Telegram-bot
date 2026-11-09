@@ -4,7 +4,7 @@
 // KV binding: USERS_KV   |  Biến tuỳ chọn: GEMINI_MODEL, PERSONALITY_MODE, GROUP_MODE
 // ============================================================
 
-const BOT_VERSION = "v9-tavily";
+const BOT_VERSION = "v10-hardened";
 
 // Tự động chọn model theo độ khó của tin nhắn:
 //  - "fast": câu ngắn, trò chuyện thường, nhắc nhở  -> model lite (nhanh, ~1s)
@@ -700,7 +700,10 @@ async function handleGithubWebhook(request, env, ctx) {
 
 // ---------------- Chẩn đoán: mở https://<worker>/health bằng trình duyệt ----------------
 
-async function handleHealth(env) {
+async function handleHealth(env, url) {
+  if (!env.HEALTH_KEY || url.searchParams.get("key") !== env.HEALTH_KEY) {
+    return new Response(JSON.stringify({ version: BOT_VERSION }, null, 2), { headers: { "content-type": "application/json; charset=utf-8" } });
+  }
   const tok = env.TELEGRAM_BOT_TOKEN || "";
   const out = {
     version: BOT_VERSION,
@@ -746,6 +749,11 @@ async function handlePrivateMessage(env, tg, message, personality) {
     appendHistory(state, "user", messageText);
     appendHistory(state, "model", tool.reply);
     await tg.replyToMessage(chatId, message.message_id, tool.reply);
+    await saveUserState(env.USERS_KV, chatId, state);
+    return;
+  }
+  if (!aiQuotaCheck(state, env, message.from?.id, 60, "AI_DAILY_CAP")) {
+    await tg.replyToMessage(chatId, message.message_id, "⏳ Hôm nay bạn đã dùng hết lượt hỏi AI. Mai quay lại nhé (lệnh quản lý và hỏi giờ/ngày vẫn dùng được).");
     await saveUserState(env.USERS_KV, chatId, state);
     return;
   }
@@ -796,6 +804,11 @@ async function handleGroupMessage(env, tg, message, personality, groupMode, botU
       return;
     }
     search = Boolean(tool?.search);
+  }
+  if (!aiQuotaCheck(state, env, message.from?.id, 150, "AI_GROUP_DAILY_CAP")) {
+    if (wasAddressed) await tg.replyToMessage(chatId, message.message_id, "⏳ Nhóm đã dùng hết lượt hỏi AI hôm nay. Mai quay lại nhé.");
+    await saveUserState(env.USERS_KV, chatId, state);
+    return;
   }
   const { shouldReply, text: aiReply, isFallback } = await generateGroupReply(env, tg, personality, {
     senderName, messageText: text, wasAddressed, history, media, search,
@@ -1399,7 +1412,7 @@ const ROSE_ADMIN = new Set([
   "setrules", "clearrules", "save", "clear", "clearall", "filter", "stop", "stopall",
   "addblocklist", "rmblocklist", "unblocklistall", "blocklistmode",
   "setflood", "setfloodmode", "setfloodtimer", "lock", "unlock",
-  "approve", "unapprove", "unapproveall", "disable", "enable", "reports",
+  "approve", "unapprove", "unapproveall", "disable", "enable", "reports", "audit",
 ]);
 const ROSE_PUBLIC = new Set([
   "rules", "get", "notes", "filters", "blocklist", "warns", "warnings", "admins", "id", "help", "locks", "locktypes",
@@ -1413,7 +1426,7 @@ const HELP = {
     "<code>bans</code> · <code>warns</code> · <code>admin</code> · <code>greetings</code> · <code>captcha</code> · <code>rules</code> · <code>notes</code> · <code>filters</code> · <code>blocklist</code> · <code>locks</code> · <code>flood</code> · <code>approvals</code> · <code>pins</code> · <code>reports</code> · <code>disable</code> · <code>format</code>",
   bans: "<b>Cấm / tắt tiếng</b> (reply hoặc gõ ID số)\n/ban /unban /kick /mute /unmute\n/tban 1h · /tmute 30m (s, m, h, d, w)\nBiến thể: /sban /skick /smute (im lặng, xoá lệnh) · /dban /dkick /dmute (xoá tin được reply)\n/kickme · tự rời nhóm",
   warns: "<b>Cảnh cáo</b>\n/warn [lý do] · /swarn · /dwarn · /unwarn (/rmwarn) · /warns · /resetwarns · /resetallwarns confirm\n/warnlimit 3 · /warnmode ban|kick|mute|tban|tmute · /warntime 1h · /warnings",
-  admin: "<b>Admin</b>\n/admins · /promote · /demote · /title tên (reply admin do bot thăng)\n/del · /purge (reply tin đầu) · /id · /info",
+  admin: "<b>Admin</b>\n/admins · /promote · /demote · /title tên (reply admin do bot thăng)\n/del · /purge (reply tin đầu) · /id · /info · /audit (nhật ký thao tác admin)",
   greetings: "<b>Chào mừng</b>\n/setwelcome nội dung · /welcome on|off · /resetwelcome · /cleanwelcome on|off\n/setgoodbye nội dung · /goodbye on|off · /cleanservice on|off (xoá tin vào/rời nhóm)\nBiến: {mention} {first} {last} {fullname} {username} {id} {chatname}",
   captcha: "<b>Captcha</b>\n/captcha on|off · /captchatime 5m\nThành viên mới bị tắt tiếng tới khi bấm nút xác minh, quá hạn sẽ bị đuổi (kiểm tra mỗi 5 phút).",
   rules: "<b>Luật</b>\n/setrules nội dung · /rules · /clearrules",
@@ -1467,7 +1480,8 @@ async function handleRoseCommand(env, tg, message, cmd0, args) {
   }
   if (ROSE_PUBLIC.has(cmd) && cfg.disabled.includes(cmd) && !(await senderIsAdmin(env, tg, message))) return true; // lệnh đã bị tắt
 
-  const save = async () => { if (!(await saveChatCfg(env, chatId, cfg))) await say("❌ Không lưu được cấu hình (KV lỗi hoặc hết hạn mức)."); else return true; };
+  const audit = (act, target, note) => auditLog(env, chatId, message.from, act, target, note);
+  const save = async () => { if (!(await saveChatCfg(env, chatId, cfg))) await say("❌ Không lưu được cấu hình (KV lỗi hoặc hết hạn mức)."); else { await audit(`cấu hình /${cmd0}`, null, args.trim().slice(0, 50)); return true; } };
   const replyText = () => message.reply_to_message?.text || message.reply_to_message?.caption || "";
   const needConfirm = async () => { if (args.trim().toLowerCase() !== "confirm") { await say(`⚠️ Thao tác này xoá toàn bộ. Gõ <code>/${cmd0} confirm</code> để xác nhận.`); return false; } return true; };
   const onoff = () => { const a = args.trim().toLowerCase(); return a === "on" || a === "yes" || a === "bật" ? true : a === "off" || a === "no" || a === "tắt" ? false : null; };
@@ -1484,28 +1498,32 @@ async function handleRoseCommand(env, tg, message, cmd0, args) {
       const m = mentionHtml(u);
       const out = flag === "s" ? async () => {} : say;
       const finish = async () => {
+        await audit(`/${cmd0}`, u, reason);
         if (flag === "d" && message.reply_to_message) await tg.call("deleteMessage", { chat_id: chatId, message_id: message.reply_to_message.message_id });
         if (flag === "s") await tg.call("deleteMessage", { chat_id: chatId, message_id: mid });
       };
 
       if (cmd === "ban") { const d = await tg.call("banChatMember", { chat_id: chatId, user_id: u.id }); if (d.ok) { await finish(); await out(`🔨 ${m} đã bị cấm.${why}`); } else await fail(d); }
-      else if (cmd === "unban") { const d = await tg.call("unbanChatMember", { chat_id: chatId, user_id: u.id, only_if_banned: true }); await (d.ok ? say(`✅ Đã gỡ cấm ${m}.`) : fail(d)); }
+      else if (cmd === "unban") { const d = await tg.call("unbanChatMember", { chat_id: chatId, user_id: u.id, only_if_banned: true }); if (d.ok) { await audit("/unban", u); await say(`✅ Đã gỡ cấm ${m}.`); } else await fail(d); }
       else if (cmd === "kick") { const d = await applyPunish(tg, chatId, u.id, "kick"); if (d.ok) { await finish(); await out(`👢 ${m} đã bị đuổi khỏi nhóm.${why}`); } else await fail(d); }
       else if (cmd === "mute") { const d = await applyPunish(tg, chatId, u.id, "mute"); if (d.ok) { await finish(); await out(`🔇 ${m} đã bị tắt tiếng.${why}`); } else await fail(d); }
-      else if (cmd === "unmute") { const d = await tg.call("restrictChatMember", { chat_id: chatId, user_id: u.id, permissions: UNMUTE_PERMS }); await (d.ok ? say(`🔊 ${m} đã được mở tiếng.`) : fail(d)); }
+      else if (cmd === "unmute") { const d = await tg.call("restrictChatMember", { chat_id: chatId, user_id: u.id, permissions: UNMUTE_PERMS }); if (d.ok) { await audit("/unmute", u); await say(`🔊 ${m} đã được mở tiếng.`); } else await fail(d); }
       else if (cmd === "tban" || cmd === "tmute") {
         const secs = parseDuration(t.tokens[0]);
         if (!secs) { await say(`❗ Cần thời gian, ví dụ: <code>/${cmd} 1h</code> (s, m, h, d, w).`); break; }
         const d = await applyPunish(tg, chatId, u.id, cmd, secs);
+        if (d.ok) await audit(`/${cmd}`, u, `${t.tokens[0]} ${reason}`);
         await (d.ok ? say(`${cmd === "tban" ? "⏳🔨" : "⏳🔇"} ${m} bị ${cmd === "tban" ? "cấm" : "tắt tiếng"} ${escapeHtml(t.tokens[0])}.${why}`) : fail(d));
       } else if (cmd === "resetwarns") {
         try { await env.USERS_KV.delete(`warn:${chatId}:${u.id}`); } catch (e) {}
+        await audit("/resetwarns", u);
         await say(`♻️ Đã xoá cảnh cáo của ${m}.`);
       } else if (cmd === "unwarn") {
         const key = `warn:${chatId}:${u.id}`;
         let w = { n: 0, r: [] };
         try { const raw = await env.USERS_KV.get(key); if (raw) w = JSON.parse(raw); } catch (e) {}
         if (w.n > 0) { w.n--; w.r.pop(); try { await env.USERS_KV.put(key, JSON.stringify(w)); } catch (e) {} }
+        await audit("/unwarn", u);
         await say(`✅ Đã gỡ 1 cảnh cáo của ${m} (còn ${w.n}/${cfg.warnlimit}).`);
       } else {
         const r = await addWarn(env, tg, chatId, u, reason, cfg);
@@ -1814,6 +1832,14 @@ async function handleRoseCommand(env, tg, message, cmd0, args) {
     case "reports": {
       const v = onoff(); if (v === null) { await say(`ℹ️ Báo cáo: ${cfg.reports ? "BẬT" : "TẮT"}. Dùng <code>/reports on|off</code>`); break; }
       cfg.reports = v; if (await save()) await say(`✅ Báo cáo: ${v ? "BẬT" : "TẮT"}`);
+      break;
+    }
+    case "audit": {
+      let arr = [];
+      try { const raw = await env.USERS_KV.get(`audit:${chatId}`); if (raw) arr = JSON.parse(raw); } catch (e) {}
+      if (!arr.length) { await say("Chưa có thao tác admin nào được ghi."); break; }
+      await say("🧾 <b>Nhật ký admin (10 gần nhất)</b>\n" + arr.slice(-10).reverse().map((x) =>
+        `• ${new Date(x.t).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh", hour12: false })} — ${escapeHtml(x.bn)}: ${escapeHtml(x.act)}${x.to ? " → " + escapeHtml(x.to) : ""}${x.note ? " (" + escapeHtml(x.note) + ")" : ""}`).join("\n"));
       break;
     }
     case "report": { await doReport(env, tg, message, cfg); break; }
@@ -2283,6 +2309,29 @@ async function tryTools(env, text) {
   return null;
 }
 
+// ---------------- Giới hạn lượt AI mỗi ngày + nhật ký admin ----------------
+
+function aiQuotaCheck(state, env, userId, defaultCap, envName) {
+  const p = vnParts(0);
+  const day = `${p.y}-${p.m}-${p.d}`;
+  if (state.aiDay !== day) { state.aiDay = day; state.aiCount = 0; }
+  if (env.ADMIN_ID && String(userId) === String(env.ADMIN_ID)) return true;
+  if (state.aiCount >= (Number(env[envName]) || defaultCap)) return false;
+  state.aiCount++;
+  return true;
+}
+
+async function auditLog(env, chatId, by, act, target, note) {
+  try {
+    const key = `audit:${chatId}`;
+    let arr = [];
+    const raw = await env.USERS_KV.get(key);
+    if (raw) arr = JSON.parse(raw);
+    arr.push({ t: Date.now(), bn: userName(by || {}).slice(0, 30), act, to: target ? userName(target).slice(0, 30) : "", note: String(note || "").slice(0, 60) });
+    await env.USERS_KV.put(key, JSON.stringify(arr.slice(-30)));
+  } catch (e) {}
+}
+
 let cachedBotUsername = null;
 async function getBotUsername(tg) {
   if (!cachedBotUsername) cachedBotUsername = ((await tg.getMe())?.username || "").toLowerCase();
@@ -2378,8 +2427,11 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/github") return handleGithubWebhook(request, env, ctx);
-    if (request.method === "GET" && url.pathname === "/health") return handleHealth(env);
+    if (request.method === "GET" && url.pathname === "/health") return handleHealth(env, url);
     if (request.method !== "POST") return new Response("Bot is running.", { status: 200 });
+    if (env.TELEGRAM_WEBHOOK_SECRET && request.headers.get("x-telegram-bot-api-secret-token") !== env.TELEGRAM_WEBHOOK_SECRET) {
+      return new Response("Forbidden", { status: 403 });
+    }
     try {
       const update = await request.json();
       ctx.waitUntil(handleUpdate(update, env));
