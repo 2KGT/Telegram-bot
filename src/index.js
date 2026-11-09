@@ -4,15 +4,17 @@
 // KV binding: USERS_KV   |  Biến tuỳ chọn: GEMINI_MODEL, PERSONALITY_MODE, GROUP_MODE
 // ============================================================
 
-const BOT_VERSION = "v10-hardened";
+const BOT_VERSION = "v10.1-models";
 
 // Tự động chọn model theo độ khó của tin nhắn:
 //  - "fast": câu ngắn, trò chuyện thường, nhắc nhở  -> model lite (nhanh, ~1s)
 //  - "smart": câu dài/phức tạp, có ảnh/video, code, phân tích, /gh -> model mạnh hơn
 // Ghi đè bằng biến MODEL_FAST / MODEL_SMART. Đặt GEMINI_MODEL để ÉP dùng 1 model cho mọi câu (tắt tự động).
-const FAST_MODELS = ["gemini-flash-lite-latest", "gemini-3.5-flash", "gemini-flash-latest"];
-const SMART_MODELS = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-flash-lite-latest"];
-const GEMINI_MODEL_CANDIDATES = [...new Set([...FAST_MODELS, ...SMART_MODELS])];
+// gemini-flash-latest từng treo 20 giây nên không đưa vào vòng chính; 2.5-flash hiện là model duy nhất của key này có Google Search.
+const FAST_MODELS = ["gemini-flash-lite-latest", "gemini-3.1-flash-lite", "gemini-3.5-flash"];
+const SMART_MODELS = ["gemini-3.5-flash", "gemini-flash-lite-latest", "gemini-3.1-flash-lite"];
+const SEARCH_MODELS = ["gemini-2.5-flash", "gemini-3.5-flash"];
+const GEMINI_MODEL_CANDIDATES = [...new Set([...FAST_MODELS, ...SMART_MODELS, "gemini-flash-latest"])];
 
 const COMPLEX_RE = /(```|\bcode\b|lập trình|viết (code|bài|email|thư|kịch bản)|giải thích|phân tích|so sánh|tại sao|vì sao|như thế nào|hướng dẫn|debug|lỗi|tóm tắt|dịch|toán|bài tập|kế hoạch|chiến lược|đánh giá|review)/i;
 
@@ -159,7 +161,10 @@ async function tryAllModels(env, systemPrompt, contents, tier = "fast", opts = {
   if (!apiKey) return { text: null, sources: [], error: Object.assign(new Error("Thiếu secret GEMINI_API_KEY"), { status: 401 }) };
 
   let models = modelsFor(env, tier);
-  if (opts.search && env.SEARCH_MODEL) models = [env.SEARCH_MODEL, ...models.filter((m) => m !== env.SEARCH_MODEL)];
+  if (opts.search) {
+    const first = [...(env.SEARCH_MODEL ? [env.SEARCH_MODEL] : []), ...SEARCH_MODELS];
+    models = [...new Set([...first, ...models])];
+  }
   if (opts.search && Date.now() < searchBlockedUntil) {
     return { text: null, sources: [], error: Object.assign(new Error("Tìm web đang tạm khoá vì Gemini báo hết hạn mức (429)"), { status: 429 }) };
   }
