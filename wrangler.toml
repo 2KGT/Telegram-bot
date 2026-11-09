@@ -14,7 +14,8 @@ crons = ["*/5 * * * *"]
 # Dán ID thật của KV namespace USERS_KV: Cloudflare -> Storage & Databases -> KV -> USERS_KV -> copy ID
 [[kv_namespaces]]
 binding = "USERS_KV"
-id = "DAN_ID_KV_THAT_VAO_DAY"
+id = a9213d428c8a4986a172f9b40c817a9b
+                 }]
 
 [observability]
 enabled = true
