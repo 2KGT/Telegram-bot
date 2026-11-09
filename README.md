@@ -13,5 +13,14 @@ và liên kết GitHub (`/gh`, webhook `/github`).
 4. Kiểm tra bản đang chạy: mở `https://telegram-bot.<tài-khoản>.workers.dev/health` (có dòng `version`).
 
 ## Biến tuỳ chọn
-`GEMINI_MODEL`, `MODEL_FAST`, `MODEL_SMART`, `SEARCH_MODEL`, `XSMB_URL`, `TAVILY_CAP`, `GITHUB_REPO`,
-`NOTIFY_CHAT_ID`, `GITHUB_AI_SUMMARY=off`, `STATS=off`.
+`GEMINI_MODEL`, `MODEL_FAST`, `MODEL_SMART`, `SEARCH_MODEL`, `XSMB_URL`, `TAVILY_API_KEY` (secret), `TAVILY_CAP`,
+`GITHUB_REPO`, `NOTIFY_CHAT_ID`, `GITHUB_AI_SUMMARY=off`, `STATS=off`.
+
+## Bảo mật và giới hạn
+- `TELEGRAM_WEBHOOK_SECRET` (secret): nếu đặt, chỉ Telegram mới gọi được webhook (đặt lại webhook với `&secret_token=<giá trị>`).
+- `HEALTH_KEY` (secret): `/health` công khai chỉ hiện phiên bản; thêm `?key=<HEALTH_KEY>` để xem chi tiết.
+- `AI_DAILY_CAP` (mặc định 60) và `AI_GROUP_DAILY_CAP` (mặc định 150): số lượt hỏi AI mỗi ngày cho mỗi chat; admin không bị giới hạn.
+- `/audit` trong nhóm: nhật ký 10 thao tác admin gần nhất.
+
+## Kiểm thử
+`npm test` chạy bộ kiểm thử giả lập (không cần mạng). GitHub Actions tự chạy mỗi lần push (`.github/workflows/check.yml`).
